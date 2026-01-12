@@ -1,404 +1,546 @@
 import { getRecord, upsertRecord, getAllRecords } from './db.js';
+import Chart from 'chart.js/auto';
 
-const STATE = {
-    currentDate: new Date().toISOString().split('T')[0],
-    mode: 'morning', // 'morning' | 'night'
-    currentRecord: null
+
+/**
+ * UI controller for 体重ログ
+ * - index_fixed.html のIDに完全準拠
+ * - グラフ0件時は graphEmptyNote を表示し canvas を隠す
+ * - Chart.js はグローバル Chart を前提（Vite/依存関係側で読み込み）
+ */
+
+// -----------------------------
+// State
+// -----------------------------
+const state = {
+  mode: 'morning', // 'morning' | 'night'
+  currentDate: null, // 'YYYY-MM-DD'
+  currentRecord: null,
 };
 
-const UI = {
-    dateInput: document.getElementById('date-input'),
-    btnMorning: document.getElementById('btn-mode-morning'),
-    btnNight: document.getElementById('btn-mode-night'),
-    weightGroup: document.getElementById('weight-group'),
-    calorieGroup: document.getElementById('calorie-group'),
-    weightInput: document.getElementById('weight-input'),
-    calorieInput: document.getElementById('calorie-input'),
-    actionBtn: document.getElementById('action-btn'),
-    appTitle: document.getElementById('app-title'),
-    themeMeta: document.getElementById('theme-color-meta'),
-    exportBtn: document.getElementById('export-btn')
+const graphState = {
+  metric: 'weight', // 'weight' | 'calorie'
+  chart: null,
 };
 
-export async function init() {
-    // Initialize Date Input
-    UI.dateInput.value = STATE.currentDate;
-
-    // Event Listeners
-    UI.dateInput.addEventListener('change', handleDateChange);
-    UI.btnMorning.addEventListener('click', () => switchMode('morning'));
-    UI.btnNight.addEventListener('click', () => switchMode('night'));
-    UI.actionBtn.addEventListener('click', handleSave);
-    UI.exportBtn.addEventListener('click', handleExport);
-
-    // Initial Load
-    await loadDataForDate(STATE.currentDate);
-    updateUI();
+// -----------------------------
+// Helpers
+// -----------------------------
+function toISODate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
-async function handleDateChange(e) {
-    STATE.currentDate = e.target.value;
-    await loadDataForDate(STATE.currentDate);
+function parseISODate(s) {
+  if (!s) return null;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setHours(0, 0, 0, 0);
+  return d;
 }
 
-async function loadDataForDate(date) {
-    try {
-        const record = await getRecord(date);
-        STATE.currentRecord = record || { date, weight: null, total_calorie: null };
-        STATE.isExistingRecord = !!record;
+function clampDateRange(start, end) {
+  const s = parseISODate(start);
+  const e = parseISODate(end);
+  if (!s || !e) return null;
+  if (s.getTime() > e.getTime()) return null;
+  return { start: s, end: e };
+}
 
-        // Populate Inputs
-        // Populate Inputs
-        UI.weightInput.value = STATE.currentRecord.weight !== null && STATE.currentRecord.weight !== undefined
-            ? Number(STATE.currentRecord.weight).toFixed(1)
-            : '';
-        UI.calorieInput.value = STATE.currentRecord.total_calorie || '';
+function show(el) {
+  if (!el) return;
+  el.classList.remove('hidden');
+}
 
-        // Special logic: If in morning mode and weight exists, maybe focus logic?
-        // If in night mode, we show weight but disable it (via UI update)
-    } catch (err) {
-        console.error('Failed to load data', err);
-        alert('データの読み込みに失敗しました。');
+function hide(el) {
+  if (!el) return;
+  el.classList.add('hidden');
+}
+
+function setBodyMode(mode) {
+  document.body.classList.toggle('mode-morning', mode === 'morning');
+  document.body.classList.toggle('mode-night', mode === 'night');
+  const theme = mode === 'morning' ? '#e0f7fa' : '#10131a';
+  if (UI.themeMeta) UI.themeMeta.setAttribute('content', theme);
+}
+
+function destroyGraphChart() {
+  try {
+    if (graphState.chart) {
+      graphState.chart.destroy();
+      graphState.chart = null;
     }
+  } catch {
+    graphState.chart = null;
+  }
+}
+
+function safeNumber(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// -----------------------------
+// UI references (index_fixed.html準拠)
+// -----------------------------
+const UI = {
+  // main
+  mainView: document.getElementById('app'),
+  dateInput: document.getElementById('date-input'),
+  btnMorning: document.getElementById('btn-mode-morning'),
+  btnNight: document.getElementById('btn-mode-night'),
+  weightGroup: document.getElementById('weight-group'),
+  calorieGroup: document.getElementById('calorie-group'),
+  weightInput: document.getElementById('weight-input'),
+  calorieInput: document.getElementById('calorie-input'),
+  actionBtn: document.getElementById('action-btn'),
+  appTitle: document.getElementById('app-title'),
+  themeMeta: document.getElementById('theme-color-meta'),
+  exportBtn: document.getElementById('export-btn'),
+  reportLinkBtn: document.getElementById('report-link-btn'),
+  graphBtn: document.getElementById('graph-btn'),
+
+  // report overlay
+  reportView: document.getElementById('report-view'),
+  reportStart: document.getElementById('report-start-date'),
+  reportEnd: document.getElementById('report-end-date'),
+  reportUpdateBtn: document.getElementById('report-update-btn'),
+  reportBackBtn: document.getElementById('report-back-btn'),
+  reportTableBody: document.getElementById('report-table-body'),
+  reportQ1w: document.getElementById('report-q-1w'),
+  reportQ1m: document.getElementById('report-q-1m'),
+  reportQ3m: document.getElementById('report-q-3m'),
+  reportQ1y: document.getElementById('report-q-1y'),
+  summaryWeight: document.getElementById('summary-weight'),
+  summaryCalorie: document.getElementById('summary-calorie'),
+
+  // graph overlay
+  graphView: document.getElementById('graph-view'),
+  graphStartDate: document.getElementById('graph-start'),
+  graphEndDate: document.getElementById('graph-end'),
+  graphUpdateBtn: document.getElementById('graph-update-btn'),
+  graphBackBtn: document.getElementById('graph-back-btn'),
+  graphCanvas: document.getElementById('graphCanvas'),
+  graphEmptyNote: document.getElementById('graphEmptyNote'),
+  metricWeightBtn: document.getElementById('metric-weight'),
+  metricCalorieBtn: document.getElementById('metric-calorie'),
+};
+
+// -----------------------------
+// Main actions
+// -----------------------------
+async function loadRecordForDate(dateISO) {
+  state.currentDate = dateISO;
+  const rec = await getRecord(dateISO);
+  state.currentRecord = rec || null;
+
+  // reflect UI
+  UI.dateInput && (UI.dateInput.value = dateISO);
+
+  const w = rec?.weight ?? '';
+  const c = rec?.total_calorie ?? '';
+  if (UI.weightInput) UI.weightInput.value = (w === null || w === undefined) ? '' : String(w);
+  if (UI.calorieInput) UI.calorieInput.value = (c === null || c === undefined) ? '' : String(c);
+
+  // button label
+  if (UI.actionBtn) {
+    UI.actionBtn.textContent = state.mode === 'morning' ? '体重を記録' : 'カロリーを記録';
+  }
+}
+
+async function saveCurrent() {
+  const dateISO = UI.dateInput?.value || state.currentDate;
+  if (!dateISO) return;
+
+  const weightVal = safeNumber(UI.weightInput?.value);
+  const calVal = safeNumber(UI.calorieInput?.value);
+
+  // validate (modeに応じて最低限)
+  if (state.mode === 'morning') {
+    if (weightVal === null || weightVal <= 0) {
+      alert('正しい体重を入力してください');
+      return;
+    }
+  } else {
+    if (calVal === null || calVal <= 0) {
+      alert('正しいカロリーを入力してください');
+      return;
+    }
+  }
+
+  // merge: 片方の値を保存しても、もう片方は既存を残す
+  const base = (await getRecord(dateISO)) || { date: dateISO, weight: null, total_calorie: null };
+  const next = {
+    ...base,
+    date: dateISO,
+    weight: (state.mode === 'morning') ? weightVal : (base.weight ?? null),
+    total_calorie: (state.mode === 'night') ? calVal : (base.total_calorie ?? null),
+  };
+
+  await upsertRecord(next);
+  await loadRecordForDate(dateISO);
 }
 
 function switchMode(mode) {
-    STATE.mode = mode;
-    updateUI();
+  state.mode = mode;
+
+  // active button styles
+  UI.btnMorning?.classList.toggle('active', mode === 'morning');
+  UI.btnNight?.classList.toggle('active', mode === 'night');
+
+  // show/hide groups
+  UI.weightGroup?.classList.toggle('hidden', mode !== 'morning');
+  UI.calorieGroup?.classList.toggle('hidden', mode !== 'night');
+
+  // title
+  if (UI.appTitle) UI.appTitle.textContent = (mode === 'morning') ? '朝の記録' : '夜の記録';
+
+  // button label
+  if (UI.actionBtn) UI.actionBtn.textContent = (mode === 'morning') ? '体重を記録' : 'カロリーを記録';
+
+  setBodyMode(mode);
 }
 
-function updateUI() {
-    const isMorning = STATE.mode === 'morning';
+// -----------------------------
+// CSV export
+// -----------------------------
+async function exportCSV() {
+  const records = await getAllRecords();
+  const header = ['date', 'weight', 'total_calorie'];
+  const lines = [header.join(',')];
 
-    // 1. Theme Configuration
-    document.body.className = isMorning ? 'mode-morning' : 'mode-night';
-    UI.themeMeta.content = isMorning ? '#e0f7fa' : '#1a237e';
+  // date asc
+  records
+    .slice()
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    .forEach(r => {
+      const row = [
+        r.date ?? '',
+        (r.weight ?? '') === null ? '' : (r.weight ?? ''),
+        (r.total_calorie ?? '') === null ? '' : (r.total_calorie ?? ''),
+      ];
+      lines.push(row.join(','));
+    });
 
-    // 2. Mode Buttons
-    UI.btnMorning.classList.toggle('active', isMorning);
-    UI.btnNight.classList.toggle('active', !isMorning);
-
-    // 3. Title & Inputs
-    if (isMorning) {
-        UI.appTitle.textContent = '朝の記録';
-
-        // Default Morning State
-        UI.calorieGroup.classList.add('hidden');
-        UI.weightInput.disabled = false;
-        UI.weightInput.parentElement.style.opacity = '1';
-
-        UI.actionBtn.textContent = '体重を記録';
-        UI.actionBtn.disabled = false;
-    } else {
-        UI.appTitle.textContent = '夜の記録';
-
-        // Default Night State
-        UI.calorieGroup.classList.remove('hidden');
-
-        // Weight is read-only in Night Mode
-        UI.weightInput.disabled = true;
-        UI.weightInput.parentElement.style.opacity = '0.7'; // Dim weight input
-
-        UI.actionBtn.textContent = '1日の記録を確定';
-        UI.actionBtn.disabled = false;
-    }
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `weight_log_${toISODate(new Date())}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
-async function handleSave() {
-    const isMorning = STATE.mode === 'morning';
-    const weightVal = parseFloat(UI.weightInput.value);
-    const calorieVal = parseInt(UI.calorieInput.value, 10);
-
-    if (isMorning) {
-        // Validate Weight
-        if (isNaN(weightVal) || weightVal <= 0) {
-            alert('正しい体重を入力してください。');
-            return;
-        }
-        STATE.currentRecord.weight = weightVal.toFixed(1); // Ensure 1 decimal place format if needed, but storage handles number
-    } else {
-        // Validate Calories
-        if (isNaN(calorieVal) || calorieVal < 0) {
-            alert('正しい総カロリーを入力してください。');
-            return;
-        }
-        // In Night mode, we also update calories. Weight is preserved from state (loaded or entered)
-        STATE.currentRecord.total_calorie = calorieVal;
-    }
-
-    // Save to DB
-    try {
-        // Create payload. Note: Date is already in currentRecord.
-        // Create payload. Note: Date is already in currentRecord.
-
-        let weightToSave = null;
-        if (UI.weightInput.value) {
-            // Round to 1 decimal place: 75.26 -> 75.3
-            const val = parseFloat(UI.weightInput.value);
-            weightToSave = Math.round(val * 10) / 10;
-            // Update input to reflect rounded value
-            UI.weightInput.value = weightToSave.toFixed(1);
-        }
-
-        const recordToSave = {
-            date: STATE.currentDate,
-            weight: weightToSave,
-            total_calorie: UI.calorieInput.value ? parseInt(UI.calorieInput.value, 10) : null
-        };
-
-        // If Morning mode, we primarily care about weight. 
-        // If record existed with calories (e.g. came back to edit weight), we preserve calories (fetched in loadData)
-        // Actually, UI inputs are the source of truth now.
-
-        await upsertRecord(recordToSave);
-        STATE.currentRecord = recordToSave;
-
-        // Visual Feedback
-        const originalText = UI.actionBtn.textContent;
-
-        // Determine message
-        // If we are in morning, and we just saved weight.
-        // If we are in night, and we just saved calories.
-        // The user requested:
-        // - Weight save -> "体重を保存しました"
-        // - Calorie save -> "1日の総カロリーを保存しました"
-        // - Update -> "同じ日付の記録を更新しました"
-
-        // Simple logic:
-        // If we are updating an existing entry (date exists in DB), use update message?
-        // But "Morning" save might be the FIRST save of the day -> Insert.
-        // "Night" save might be the SECOND save -> Update.
-        // Or "Morning" save might be re-save -> Update.
-
-        // Let's try to pass 'isUpdate' from upsertRecord? 
-        // No, upsertRecord returns key.
-        // We can rely on STATE.currentRecord BEFORE the save.
-        // If STATE.currentRecord.weight was present (and we are saving weight), it's an update.
-        // If STATE.currentRecord.total_calorie was present (and we are saving calorie), it's an update.
-        // BUT be careful: if we load a day with NO record, STATE.currentRecord is a shell object {date, weight: null...}.
-        // So we check if the relevant field was non-null.
-
-        // However, the "record" itself might exist or not.
-        // Let's use a simpler approach based on user flow implies:
-        // If Morning -> "体重を保存しました"
-        // If Night -> "1日の総カロリーを保存しました"
-        // If re-saving (e.g. clicking button again)?
-
-        // I will implement the specific "Update" message if the record ALREADY had data for that field?
-        // No, "Update" usually means "Overwriting".
-        // "Same date update" -> "同じ日付の記録を更新しました"
-
-        // Let's stick to specific messages for clarity unless it's a re-edit.
-        // Actually, "Same date update" might specifically mean "You are changing existing data".
-        // I will implement a check:
-        // But I don't have the 'previous' state easily since I overwrite recordToSave.
-
-        // Let's just use the safe morning/night messages for now to ensure we don't show English.
-        // Showing "体重を保存しました" is always correct if we saved weight.
-
-        // Determine message
-        let message = '';
-        if (STATE.isExistingRecord) {
-            message = '同じ日付の記録を更新しました';
-        } else {
-            message = isMorning ? '体重を保存しました' : '1日の総カロリーを保存しました';
-        }
-
-        UI.actionBtn.textContent = message;
-        UI.actionBtn.style.backgroundColor = '#4caf50'; // Green for success
-
-        // Update local state to reflect it now exists
-        STATE.isExistingRecord = true;
-
-        setTimeout(() => {
-            UI.actionBtn.textContent = originalText;
-            UI.actionBtn.style.backgroundColor = ''; // Reset
-        }, 1500);
-
-    } catch (err) {
-        console.error('Save failed', err);
-        alert('保存に失敗しました。');
-    }
-}
-
-async function handleExport() {
-    try {
-        const records = await getAllRecords();
-        if (!records || records.length === 0) {
-            alert('エクスポートするデータがありません。');
-            return;
-        }
-
-        // Sort by date
-        records.sort((a, b) => a.date.localeCompare(b.date));
-
-        let csvContent = "data:text/csv;charset=utf-8,";
-        csvContent += "Date,Weight,TotalCalorie\n";
-
-        records.forEach(r => {
-            const w = r.weight !== null ? r.weight : '';
-            const c = r.total_calorie !== null ? r.total_calorie : '';
-            csvContent += `${r.date},${w},${c}\n`;
-        });
-
-        const encodedUri = encodeURI(csvContent);
-        const link = document.createElement("a");
-        link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `weight_calorie_export_${STATE.currentDate}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-
-    } catch (err) {
-        console.error('Export failed', err);
-        alert('エクスポートに失敗しました。');
-    }
-}
-// Report UI References
-UI.reportLinkBtn = document.getElementById('report-link-btn');
-UI.reportView = document.getElementById('report-view');
-UI.reportBackBtn = document.getElementById('report-back-btn');
-UI.reportStartDate = document.getElementById('report-start-date');
-UI.reportEndDate = document.getElementById('report-end-date');
-UI.reportUpdateBtn = document.getElementById('report-update-btn');
-UI.reportTableBody = document.getElementById('report-table-body');
-UI.summaryWeight = document.getElementById('summary-weight');
-UI.summaryCalorie = document.getElementById('summary-calorie');
-
-// Init Report Listeners
-if (UI.reportLinkBtn) {
-    UI.reportLinkBtn.addEventListener('click', openReport);
-    UI.reportBackBtn.addEventListener('click', closeReport);
-    UI.reportUpdateBtn.addEventListener('click', updateReport);
-}
-
+// -----------------------------
+// Report View
+// -----------------------------
 function openReport() {
-    // Set default dates: Today and 7 days ago
-    const today = new Date();
-    const ago7 = new Date();
-    ago7.setDate(today.getDate() - 6); // 7 days inclusive: today, -1, -2... -6
+  hide(UI.mainView);
+  show(UI.reportView);
 
-    UI.reportEndDate.value = formatDate(today);
-    UI.reportStartDate.value = formatDate(ago7);
+  // default: last 30 days
+  const end = new Date();
+  end.setHours(0, 0, 0, 0);
+  const start = new Date(end);
+  start.setDate(start.getDate() - 29);
 
-    UI.reportView.classList.remove('hidden');
-    updateReport();
+  UI.reportStart && (UI.reportStart.value = toISODate(start));
+  UI.reportEnd && (UI.reportEnd.value = toISODate(end));
+
+  updateReport();
 }
 
 function closeReport() {
-    UI.reportView.classList.add('hidden');
+  hide(UI.reportView);
+  show(UI.mainView);
 }
 
-function formatDate(d) {
-    // YYYY-MM-DD
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
+function applyQuickReport(days) {
+  const end = new Date();
+  end.setHours(0, 0, 0, 0);
+  const start = new Date(end);
+  start.setDate(start.getDate() - Math.max(0, days - 1));
+  UI.reportStart && (UI.reportStart.value = toISODate(start));
+  UI.reportEnd && (UI.reportEnd.value = toISODate(end));
+  updateReport();
 }
 
 async function updateReport() {
-    const start = UI.reportStartDate.value;
-    const end = UI.reportEndDate.value;
+  const range = clampDateRange(UI.reportStart?.value, UI.reportEnd?.value);
+  if (!range) {
+    alert('開始日・終了日を正しく入力してください');
+    return;
+  }
+  const { start, end } = range;
 
-    if (!start || !end) return;
+  const all = await getAllRecords();
+  const filtered = all
+    .filter(r => {
+      const d = parseISODate(r.date);
+      if (!d) return false;
+      return d.getTime() >= start.getTime() && d.getTime() <= end.getTime();
+    })
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
 
-    try {
-        const allRecords = await getAllRecords();
-        // Filter
-        const filtered = allRecords.filter(r => r.date >= start && r.date <= end);
-        // Sort
-        filtered.sort((a, b) => a.date.localeCompare(b.date));
+  // table
+  if (UI.reportTableBody) UI.reportTableBody.innerHTML = '';
 
-        renderReportTable(filtered);
-        renderSummary(filtered);
-    } catch (err) {
-        console.error('Report error', err);
-        alert('レポートの表示に失敗しました');
+  let prevWeight = null;
+  filtered.forEach(r => {
+    const w = safeNumber(r.weight);
+    const diff = (w !== null && prevWeight !== null) ? (w - prevWeight) : null;
+    if (w !== null) prevWeight = w;
+
+    const tr = document.createElement('tr');
+
+    const tdDate = document.createElement('td');
+    tdDate.style.padding = '10px';
+    tdDate.style.borderBottom = '1px solid rgba(0,0,0,0.06)';
+    tdDate.textContent = r.date ?? '';
+
+    const tdW = document.createElement('td');
+    tdW.style.padding = '10px';
+    tdW.style.textAlign = 'right';
+    tdW.style.borderBottom = '1px solid rgba(0,0,0,0.06)';
+    tdW.textContent = w === null ? '-' : w.toFixed(1);
+
+    const tdDiff = document.createElement('td');
+    tdDiff.style.padding = '10px';
+    tdDiff.style.textAlign = 'right';
+    tdDiff.style.borderBottom = '1px solid rgba(0,0,0,0.06)';
+    tdDiff.textContent = diff === null ? '-' : (diff > 0 ? `+${diff.toFixed(1)}` : diff.toFixed(1));
+
+    tr.appendChild(tdDate);
+    tr.appendChild(tdW);
+    tr.appendChild(tdDiff);
+    UI.reportTableBody?.appendChild(tr);
+  });
+
+  // summary
+  const weights = filtered.map(r => safeNumber(r.weight)).filter(v => v !== null);
+  const cals = filtered.map(r => safeNumber(r.total_calorie)).filter(v => v !== null);
+
+  if (UI.summaryWeight) {
+    if (weights.length === 0) UI.summaryWeight.textContent = '-';
+    else {
+      const avg = weights.reduce((a, b) => a + b, 0) / weights.length;
+      UI.summaryWeight.textContent = `平均 ${avg.toFixed(1)} / 件数 ${weights.length}`;
     }
+  }
+
+  if (UI.summaryCalorie) {
+    if (cals.length === 0) UI.summaryCalorie.textContent = '-';
+    else {
+      const avg = cals.reduce((a, b) => a + b, 0) / cals.length;
+      UI.summaryCalorie.textContent = `平均 ${Math.round(avg)} / 件数 ${cals.length}`;
+    }
+  }
 }
 
-function renderReportTable(records) {
-    UI.reportTableBody.innerHTML = '';
+// -----------------------------
+// Graph View
+// -----------------------------
+function setGraphTab(metric) {
+  graphState.metric = metric;
 
-    let prevWeight = null;
+  UI.metricWeightBtn?.classList.toggle('is-active', metric === 'weight');
+  UI.metricCalorieBtn?.classList.toggle('is-active', metric === 'calorie');
+}
 
-    records.forEach(r => {
-        // Skip if weight is null, unless user wants to see caloric records too?
-        // User requirements said for report: "期間内の体重推移を一覧表示".
-        // "体重が未入力の日付は行を表示しない" is requested.
-        const w = r.weight !== null && r.weight !== undefined ? parseFloat(r.weight) : null;
+function openGraph() {
+  hide(UI.mainView);
+  show(UI.graphView);
 
-        if (w === null) return; // Skip if no weight
+  // default: last 7 days
+  const end = new Date();
+  end.setHours(0, 0, 0, 0);
+  const start = new Date(end);
+  start.setDate(start.getDate() - 6);
 
-        const row = document.createElement('tr');
+  UI.graphStartDate && (UI.graphStartDate.value = toISODate(start));
+  UI.graphEndDate && (UI.graphEndDate.value = toISODate(end));
 
-        // Date col
-        const dDate = new Date(r.date);
-        const dateStr = `${dDate.getMonth() + 1}/${dDate.getDate()}`; // M/D format
+  setGraphTab('weight');
+  updateGraph();
 
-        // Diff
-        let diffStr = '-';
-        let diffColor = 'inherit';
-        if (prevWeight !== null) {
-            const diff = w - prevWeight;
-            const sign = diff > 0 ? '+' : '';
-            diffStr = `${sign}${diff.toFixed(1)}`;
-            // Color logic: Gain = Red/Warn, Loss = Blue/Info?
-            // Usually diet app: Loss is Good (Blue/Green), Gain is Bad (Red).
-            if (diff > 0) diffColor = '#e53935'; // Red
-            if (diff < 0) diffColor = '#1e88e5'; // Blue
-            if (diff === 0) diffStr = '±0';
-        }
+  // quick button active styling
+  const quickBtns = Array.from(document.querySelectorAll('#graph-view .quick-btn'));
+  quickBtns.forEach(b => b.classList.remove('active'));
+  const active = quickBtns.find(b => String(b.dataset.range) === '7');
+  active?.classList.add('active');
+}
 
-        // HTML construction
-        row.innerHTML = `
-            <td style="text-align: left; padding: 12px; border-bottom: 1px solid rgba(0,0,0,0.05);">${dateStr}</td>
-            <td style="text-align: right; padding: 12px; border-bottom: 1px solid rgba(0,0,0,0.05); font-weight:bold;">${w.toFixed(1)}</td>
-            <td style="text-align: right; padding: 12px; border-bottom: 1px solid rgba(0,0,0,0.05); color: ${diffColor}; opacity: 0.8; font-size: 0.85rem;">${diffStr}</td>
-        `;
+function closeGraph() {
+  hide(UI.graphView);
+  show(UI.mainView);
+  destroyGraphChart();
+}
 
-        UI.reportTableBody.appendChild(row);
-        prevWeight = w;
+function applyQuickRangeDays(days) {
+  const end = new Date();
+  end.setHours(0, 0, 0, 0);
+  const start = new Date(end);
+  start.setDate(start.getDate() - Math.max(0, days - 1));
+
+  UI.graphStartDate && (UI.graphStartDate.value = toISODate(start));
+  UI.graphEndDate && (UI.graphEndDate.value = toISODate(end));
+
+  // active styles
+  const buttons = Array.from(document.querySelectorAll('#graph-view .quick-btn'));
+  buttons.forEach(btn => btn.classList.remove('active'));
+  const active = buttons.find(btn => String(btn.dataset.range) === String(days));
+  active?.classList.add('active');
+
+  updateGraph();
+}
+
+async function updateGraph() {
+  const range = clampDateRange(UI.graphStartDate?.value, UI.graphEndDate?.value);
+  if (!range) {
+    alert('開始日・終了日を正しく入力してください');
+    return;
+  }
+  const { start, end } = range;
+
+  const all = await getAllRecords();
+  const records = all
+    .filter(r => {
+      const d = parseISODate(r.date);
+      if (!d) return false;
+      return d.getTime() >= start.getTime() && d.getTime() <= end.getTime();
+    })
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+
+  renderGraph(records);
+}
+
+function renderGraph(records) {
+  destroyGraphChart();
+
+  // データが無い or 指標が全てnullなら empty を出す
+  const isWeight = graphState.metric === 'weight';
+  const values = records.map(r => safeNumber(isWeight ? r.weight : r.total_calorie));
+  const hasAny = values.some(v => v !== null);
+
+  if (!UI.graphCanvas) return;
+
+  if (!hasAny) {
+    // hide canvas, show note
+    UI.graphCanvas.style.display = 'none';
+    show(UI.graphEmptyNote);
+    return;
+  }
+
+  // show canvas, hide note
+  UI.graphCanvas.style.display = 'block';
+  hide(UI.graphEmptyNote);
+
+  // labels and data
+  const labels = records.map(r => {
+    const d = parseISODate(r.date) || new Date(r.date);
+    const mm = d.getMonth() + 1;
+    const dd = d.getDate();
+    return `${mm}/${dd}`;
+  });
+
+  const dataset = {
+    label: isWeight ? '体重 (kg)' : 'カロリー (kcal)',
+    data: values,
+    spanGaps: true,
+    tension: 0.25,
+    pointRadius: 3,
+    pointHoverRadius: 5,
+  };
+
+  const ctx = UI.graphCanvas.getContext('2d');
+  if (!ctx || typeof Chart === 'undefined') {
+    console.warn('Chart.js が読み込まれていません');
+    return;
+  }
+
+  graphState.chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [dataset] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true },
+      },
+      scales: {
+        y: { beginAtZero: false },
+      },
+    },
+  });
+}
+
+// -----------------------------
+// Init
+// -----------------------------
+export async function init() {
+  // default date: today
+  const today = toISODate(new Date());
+  if (UI.dateInput && !UI.dateInput.value) UI.dateInput.value = today;
+
+  switchMode('morning');
+  await loadRecordForDate(UI.dateInput?.value || today);
+
+  // main listeners
+  UI.dateInput?.addEventListener('change', async () => {
+    const dateISO = UI.dateInput.value;
+    await loadRecordForDate(dateISO);
+  });
+
+  UI.btnMorning?.addEventListener('click', async () => {
+    switchMode('morning');
+    await loadRecordForDate(UI.dateInput?.value || today);
+  });
+
+  UI.btnNight?.addEventListener('click', async () => {
+    switchMode('night');
+    await loadRecordForDate(UI.dateInput?.value || today);
+  });
+
+  UI.actionBtn?.addEventListener('click', saveCurrent);
+  UI.exportBtn?.addEventListener('click', exportCSV);
+
+  UI.reportLinkBtn?.addEventListener('click', openReport);
+  UI.graphBtn?.addEventListener('click', openGraph);
+
+  // report listeners
+  UI.reportUpdateBtn?.addEventListener('click', updateReport);
+  UI.reportBackBtn?.addEventListener('click', closeReport);
+  UI.reportQ1w?.addEventListener('click', () => applyQuickReport(7));
+  UI.reportQ1m?.addEventListener('click', () => applyQuickReport(30));
+  UI.reportQ3m?.addEventListener('click', () => applyQuickReport(90));
+  UI.reportQ1y?.addEventListener('click', () => applyQuickReport(365));
+
+  // graph listeners
+  UI.graphBackBtn?.addEventListener('click', closeGraph);
+  UI.graphUpdateBtn?.addEventListener('click', updateGraph);
+
+  // quick buttons inside graph-view
+  document.querySelectorAll('#graph-view .quick-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const days = Number(btn.dataset.range);
+      if (!Number.isFinite(days) || days <= 0) return;
+      applyQuickRangeDays(days);
     });
+  });
 
-    // Empty state
-    if (UI.reportTableBody.children.length === 0) {
-        UI.reportTableBody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding: 20px; opacity: 0.6;">データがありません</td></tr>';
-    }
-}
+  UI.metricWeightBtn?.addEventListener('click', () => {
+    setGraphTab('weight');
+    updateGraph();
+  });
 
-function renderSummary(records) {
-    // Weight Stats
-    const weights = records
-        .map(r => r.weight !== null && r.weight !== undefined ? parseFloat(r.weight) : null)
-        .filter(w => w !== null && w > 0); // Exclude 0 or null
-
-    let weightHtml = '-';
-    if (weights.length > 0) {
-        const sumW = weights.reduce((a, b) => a + b, 0);
-        const avgW = (sumW / weights.length).toFixed(1);
-        const minW = Math.min(...weights).toFixed(1);
-        const maxW = Math.max(...weights).toFixed(1);
-        weightHtml = `
-            <div style="font-size: 1.1rem; font-weight:bold;">平均 ${avgW} <span style="font-size:0.7rem; font-weight:normal;">(n=${weights.length})</span></div>
-            <div style="font-size: 0.8rem; margin-top:4px;">Min ${minW} / Max ${maxW}</div>
-        `;
-    }
-    UI.summaryWeight.innerHTML = weightHtml;
-
-    // Calorie Stats
-    const calories = records
-        .map(r => r.total_calorie !== null && r.total_calorie !== undefined ? parseInt(r.total_calorie, 10) : null)
-        .filter(c => c !== null && c > 0);
-
-    let calHtml = '-';
-    if (calories.length > 0) {
-        const sumC = calories.reduce((a, b) => a + b, 0);
-        const avgC = Math.round(sumC / calories.length);
-        calHtml = `
-            <div style="font-size: 1.1rem; font-weight:bold;">平均 ${avgC} <span style="font-size:0.7rem; font-weight:normal;">(n=${calories.length})</span></div>
-        `;
-    }
-    UI.summaryCalorie.innerHTML = calHtml;
+  UI.metricCalorieBtn?.addEventListener('click', () => {
+    setGraphTab('calorie');
+    updateGraph();
+  });
 }
