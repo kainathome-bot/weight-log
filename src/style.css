@@ -483,3 +483,36 @@ body.mode-night #graphEmptyNote {
     height: 200px !important;
   }
 }
+
+/* Toast notification */
+.toast {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-20px);
+  padding: 14px 24px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  z-index: 1000;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+}
+
+.toast.success {
+  background: #4caf50;
+  color: #fff;
+}
+
+.toast.error {
+  background: #f44336;
+  color: #fff;
+}

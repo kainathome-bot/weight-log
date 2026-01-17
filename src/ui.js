@@ -77,6 +77,34 @@ function destroyGraphChart() {
   }
 }
 
+// Toast notification helper
+let toastTimer = null;
+function showToast(message, type = 'success', duration = 2000) {
+  const toast = document.getElementById('toast');
+  if (!toast) return;
+  
+  // Clear any existing timer
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+  }
+  
+  // Reset classes and set new content
+  toast.className = 'toast';
+  toast.textContent = message;
+  toast.classList.add(type);
+  
+  // Show toast
+  requestAnimationFrame(() => {
+    toast.classList.add('show');
+  });
+  
+  // Auto-hide after duration
+  toastTimer = setTimeout(() => {
+    toast.classList.remove('show');
+    toastTimer = null;
+  }, duration);
+}
+
 function safeNumber(v) {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
@@ -171,17 +199,25 @@ async function saveCurrent() {
     }
   }
 
-  // merge: 片方の値を保存しても、もう片方は既存を残す
-  const base = (await getRecord(dateISO)) || { date: dateISO, weight: null, total_calorie: null };
-  const next = {
-    ...base,
-    date: dateISO,
-    weight: (state.mode === 'morning') ? weightVal : (base.weight ?? null),
-    total_calorie: (state.mode === 'night') ? calVal : (base.total_calorie ?? null),
-  };
+  try {
+    // merge: 片方の値を保存しても、もう片方は既存を残す
+    const base = (await getRecord(dateISO)) || { date: dateISO, weight: null, total_calorie: null };
+    const next = {
+      ...base,
+      date: dateISO,
+      weight: (state.mode === 'morning') ? weightVal : (base.weight ?? null),
+      total_calorie: (state.mode === 'night') ? calVal : (base.total_calorie ?? null),
+    };
 
-  await upsertRecord(next);
-  await loadRecordForDate(dateISO);
+    await upsertRecord(next);
+    await loadRecordForDate(dateISO);
+    
+    // Show success toast
+    showToast('登録しました', 'success', 2000);
+  } catch (err) {
+    console.error('Save failed:', err);
+    showToast('登録に失敗しました', 'error', 2500);
+  }
 }
 
 function switchMode(mode) {
@@ -509,6 +545,21 @@ export async function init() {
 
   UI.actionBtn?.addEventListener('click', saveCurrent);
   UI.exportBtn?.addEventListener('click', exportCSV);
+
+  // Enter key handlers to dismiss mobile keyboard
+  UI.weightInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      UI.weightInput.blur();
+    }
+  });
+
+  UI.calorieInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      UI.calorieInput.blur();
+    }
+  });
 
   UI.reportLinkBtn?.addEventListener('click', openReport);
   UI.graphBtn?.addEventListener('click', openGraph);
